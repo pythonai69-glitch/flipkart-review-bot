@@ -156,6 +156,16 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 from keep_alive import keep_alive
 
 if __name__ == '__main__':
+    import asyncio
+    # Fix for Python 3.12+ / 3.14 where no default event loop is created
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     keep_alive()
     application = ApplicationBuilder().token(TOKEN).build()
     
