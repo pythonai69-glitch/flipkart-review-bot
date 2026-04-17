@@ -1,0 +1,15 @@
+# Environment variables (sensitive tokens - NEVER push this!)
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# User data
+users.txt
