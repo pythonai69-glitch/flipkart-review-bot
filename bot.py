@@ -123,14 +123,16 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         author = html.escape(r.get('author', 'Unknown'))
         
         review_text = (
-            f"<blockquote><b>{idx+1}. {title}</b>  ❞\n"
+            f"<blockquote><b>{idx+1}. {title}</b>\n"
             f"{stars} {r.get('rating', '')}/5 • 🗓️ {date_str}\n"
             f"{body}\n"
             f"- <b>{author}</b>"
         )
         
-        if r.get('url'):
-            review_text += f"\n🔗 <a href=\"{r['url']}\">View Review</a>"
+        url = r.get('url')
+        if url:
+            escaped_url = html.escape(url)
+            review_text += f"\n🔗 <a href=\"{escaped_url}\">View Review</a>"
             
         review_text += "</blockquote>\n\n"
         
