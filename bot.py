@@ -111,49 +111,46 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
         
     import html
-    from telegram import CopyTextButton
-    chat_id_val = update.effective_chat.id
-
-    # Send each review as individual message with native copy button
+    # Send reviews in chunks to avoid hitting Telegram's message length limits
+    chunk = ""
     for idx, r in enumerate(reviews):
         try:
             rating_num = int(float(r.get('rating', 0)))
         except ValueError:
             rating_num = 0
-
+            
         stars = "⭐" * rating_num
         date_str = html.escape(r.get('created', ''))
         title = html.escape(r.get('title', ''))
         body = html.escape(r.get('body', ''))
         author = html.escape(r.get('author', 'Unknown'))
-        review_link = r.get('url', '')
-
-        review_html = (
+        
+        review_text = (
             f"<blockquote><b>{idx+1}. {title}</b>\n"
             f"{stars} {r.get('rating', '')}/5 • 🗓️ {date_str}\n"
             f"{body}\n"
-            f"- <b>{author}</b></blockquote>"
+            f"- <b>{author}</b>"
         )
-
-        # Build buttons
-        buttons = []
-        if review_link:
-            row = [
-                InlineKeyboardButton("📋 Copy Link", copy_text=CopyTextButton(text=review_link)),
-                InlineKeyboardButton("🔗 View Review", url=review_link)
-            ]
-            buttons.append(row)
-
-        reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
-
-        await context.bot.send_message(
-            chat_id=chat_id_val,
-            text=review_html,
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
-
-    await context.bot.send_message(chat_id=chat_id_val, text="✅ All done! Send another link to start again.")
+        
+        url = r.get('url')
+        if url:
+            escaped_url = html.escape(url)
+            review_text += f"\n🔗 <a href=\"{escaped_url}\">View Review</a>"
+            
+        review_text += "</blockquote>\n\n"
+        
+        # Telegram max length is 4096, if chunk gets too big, send it and clear
+        if len(chunk) + len(review_text) > 4000:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk, parse_mode='HTML')
+            chunk = ""
+            
+        chunk += review_text
+        
+    # Send the remainder
+    if chunk:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk, parse_mode='HTML')
+        
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="All done! Send another link to start again.")
     return WAITING_FOR_LINK
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
