@@ -4,21 +4,32 @@ from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 from scraper import get_review_url, extract_reviews_from_html, fetch_reviews
+import pymongo
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
+MONGO_URI = os.getenv("MONGO_URI")
 
+db_client = pymongo.MongoClient(MONGO_URI) if MONGO_URI else None
+db = db_client["flipkart_bot"] if db_client else None
+users_collection = db["users"] if db is not None else None
 def save_user(chat_id):
-    users = set()
-    if os.path.exists('users.txt'):
-        with open('users.txt', 'r') as f:
-            for line in f:
-                users.add(line.strip())
     chat_id_str = str(chat_id)
-    if chat_id_str not in users:
-        with open('users.txt', 'a') as f:
-            f.write(chat_id_str + '\n')
+    if users_collection is not None:
+        try:
+            users_collection.update_one({"chat_id": chat_id_str}, {"$set": {"chat_id": chat_id_str}}, upsert=True)
+        except Exception as e:
+            print(f"MongoDB Error: {e}")
+    else:
+        users = set()
+        if os.path.exists('users.txt'):
+            with open('users.txt', 'r') as f:
+                for line in f:
+                    users.add(line.strip())
+        if chat_id_str not in users:
+            with open('users.txt', 'a') as f:
+                f.write(chat_id_str + '\n')
 # States for conversation
 WAITING_FOR_LINK = 1
 WAITING_FOR_SORT = 2
@@ -139,10 +150,10 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     success = 0
     failed = 0
     
-    if os.path.exists('users.txt'):
-        with open('users.txt', 'r') as f:
-            for line in f:
-                uid = line.strip()
+    if users_collection is not None:
+        try:
+            for user_doc in users_collection.find({}):
+                uid = user_doc.get("chat_id")
                 if uid and uid != chat_id:
                     try:
                         await context.bot.send_message(chat_id=int(uid), text=message)
@@ -150,6 +161,20 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await asyncio.sleep(0.1)
                     except Exception as e:
                         failed += 1
+        except Exception as e:
+            print(f"MongoDB Error: {e}")
+    else:
+        if os.path.exists('users.txt'):
+            with open('users.txt', 'r') as f:
+                for line in f:
+                    uid = line.strip()
+                    if uid and uid != chat_id:
+                        try:
+                            await context.bot.send_message(chat_id=int(uid), text=message)
+                            success += 1
+                            await asyncio.sleep(0.1)
+                        except Exception as e:
+                            failed += 1
                         
     await update.message.reply_text(f"Broadcast complete.\nSuccessful: {success}\nFailed: {failed}")
 
