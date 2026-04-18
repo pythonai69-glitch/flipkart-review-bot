@@ -107,34 +107,43 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_chat.id, text="No reviews could be extracted. The product might have no reviews or the bot was blocked.")
         return ConversationHandler.END
         
+    import html
     # Send reviews in chunks to avoid hitting Telegram's message length limits
     chunk = ""
     for idx, r in enumerate(reviews):
-        # Format the review beautifully mimicking a card
-        certified_badge = "✅ Certified Buyer" if r.get('certified') else ""
-        loc_str = f"📍 {r['location']}  •  " if r.get('location') else ""
-        date_str = f"🕒 {r['created']}  " if r.get('created') else ""
-        meta_line = f"{loc_str}{date_str}{certified_badge}".strip()
-        link_line = f"\n🔗 [Original Flipkart Review]({r.get('url')})" if r.get('url') else ""
+        try:
+            rating_num = int(float(r.get('rating', 0)))
+        except ValueError:
+            rating_num = 0
+            
+        stars = "⭐" * rating_num
+        date_str = html.escape(r.get('created', ''))
+        title = html.escape(r.get('title', ''))
+        body = html.escape(r.get('body', ''))
+        author = html.escape(r.get('author', 'Unknown'))
         
         review_text = (
-            f"⭐️ {r['rating']}  |  👤 {r.get('author', 'Unknown')}\n"
-            f"*{r['title']}*\n"
-            f"{r['body']}\n\n"
-            f"_{meta_line}_{link_line}\n"
-            f"━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<blockquote><b>{idx+1}. {title}</b>  ❞\n"
+            f"{stars} {r.get('rating', '')}/5 • 🗓️ {date_str}\n"
+            f"{body}\n"
+            f"- <b>{author}</b>"
         )
+        
+        if r.get('url'):
+            review_text += f"\n🔗 <a href=\"{r['url']}\">View Review</a>"
+            
+        review_text += "</blockquote>\n\n"
         
         # Telegram max length is 4096, if chunk gets too big, send it and clear
         if len(chunk) + len(review_text) > 4000:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk, parse_mode='Markdown')
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk, parse_mode='HTML')
             chunk = ""
             
         chunk += review_text
         
     # Send the remainder
     if chunk:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk, parse_mode='Markdown')
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk, parse_mode='HTML')
         
     await context.bot.send_message(chat_id=update.effective_chat.id, text="All done! Send another link to start again.")
     return WAITING_FOR_LINK
