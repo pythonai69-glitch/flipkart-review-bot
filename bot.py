@@ -79,8 +79,8 @@ async def select_sort(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['sort'] = query.data
     
     keyboard = [
-        [InlineKeyboardButton("5", callback_data='5'), InlineKeyboardButton("10", callback_data='10')],
-        [InlineKeyboardButton("20", callback_data='20'), InlineKeyboardButton("30", callback_data='30')]
+        [InlineKeyboardButton("10", callback_data='10'), InlineKeyboardButton("30", callback_data='30')],
+        [InlineKeyboardButton("60", callback_data='60'), InlineKeyboardButton("100", callback_data='100')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
