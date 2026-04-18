@@ -111,8 +111,9 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
         
     import html
-    # Send reviews in chunks to avoid hitting Telegram's message length limits
-    chunk = ""
+    chat_id_val = update.effective_chat.id
+    
+    # Send each review as an individual message with a Copy button
     for idx, r in enumerate(reviews):
         try:
             rating_num = int(float(r.get('rating', 0)))
@@ -124,33 +125,48 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title = html.escape(r.get('title', ''))
         body = html.escape(r.get('body', ''))
         author = html.escape(r.get('author', 'Unknown'))
+        review_link = r.get('url', '')
         
-        review_text = (
+        # HTML formatted message
+        review_html = (
             f"<blockquote><b>{idx+1}. {title}</b>\n"
             f"{stars} {r.get('rating', '')}/5 • 🗓️ {date_str}\n"
             f"{body}\n"
             f"- <b>{author}</b>"
         )
+        if review_link:
+            escaped_url = html.escape(review_link)
+            review_html += f"\n🔗 <a href=\"{escaped_url}\">View Review</a>"
+        review_html += "</blockquote>"
         
-        url = r.get('url')
-        if url:
-            escaped_url = html.escape(url)
-            review_text += f"\n🔗 <a href=\"{escaped_url}\">View Review</a>"
-            
-        review_text += "</blockquote>\n\n"
+        # Plain text for copy (no HTML tags)
+        plain_text = (
+            f"{idx+1}. {r.get('title', '')}\n"
+            f"{stars} {r.get('rating', '')}/5 | {r.get('created', '')}\n"
+            f"{r.get('body', '')}\n"
+            f"- {r.get('author', 'Unknown')}"
+        )
+        if review_link:
+            plain_text += f"\n🔗 {review_link}"
         
-        # Telegram max length is 4096, if chunk gets too big, send it and clear
-        if len(chunk) + len(review_text) > 4000:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk, parse_mode='HTML')
-            chunk = ""
-            
-        chunk += review_text
+        # Store plain text in bot_data with a unique key
+        copy_key = f"copy_{chat_id_val}_{idx}"
+        context.bot_data[copy_key] = plain_text
         
-    # Send the remainder
-    if chunk:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk, parse_mode='HTML')
+        # Build inline keyboard
+        buttons = [[InlineKeyboardButton("📋 Copy Text", callback_data=f"copyreview:{copy_key}")]]
+        if review_link:
+            buttons[0].append(InlineKeyboardButton("🔗 View Review", url=review_link))
+        reply_markup = InlineKeyboardMarkup(buttons)
         
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="All done! Send another link to start again.")
+        await context.bot.send_message(
+            chat_id=chat_id_val,
+            text=review_html,
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+        
+    await context.bot.send_message(chat_id=chat_id_val, text="✅ All done! Send another link to start again.")
     return WAITING_FOR_LINK
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -206,6 +222,26 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         
     await update.message.reply_text(f"Broadcast complete.\nSuccessful: {success}\nFailed: {failed}")
 
+async def copy_review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the 📋 Copy Text button — sends plain text so user can easily copy."""
+    query = update.callback_query
+    await query.answer("📋 Review text sent below!", show_alert=False)
+    
+    copy_key = query.data.replace("copyreview:", "", 1)
+    plain_text = context.bot_data.get(copy_key)
+    
+    if plain_text:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"📋 <b>Copy this review:</b>\n\n<code>{plain_text}</code>",
+            parse_mode='HTML'
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="⚠️ Review text not found. Please fetch reviews again."
+        )
+
 from keep_alive import keep_alive
 
 if __name__ == '__main__':
@@ -234,5 +270,6 @@ if __name__ == '__main__':
 
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler('broadcast', broadcast))
+    application.add_handler(CallbackQueryHandler(copy_review_handler, pattern='^copyreview:'))
     print("Bot is polling...")
     application.run_polling()
