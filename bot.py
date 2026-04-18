@@ -11,9 +11,18 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 MONGO_URI = os.getenv("MONGO_URI")
 
-db_client = pymongo.MongoClient(MONGO_URI) if MONGO_URI else None
-db = db_client["flipkart_bot"] if db_client else None
-users_collection = db["users"] if db is not None else None
+db_client = None
+db = None
+users_collection = None
+
+if MONGO_URI:
+    try:
+        db_client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        db = db_client["flipkart_bot"]
+        users_collection = db["users"]
+    except Exception as e:
+        print(f"Failed to connect to MongoDB: {e}")
+
 def save_user(chat_id):
     chat_id_str = str(chat_id)
     if users_collection is not None:
