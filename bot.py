@@ -25,12 +25,15 @@ if MONGO_URI:
 
 def save_user(chat_id):
     chat_id_str = str(chat_id)
+    mongo_success = False
     if users_collection is not None:
         try:
             users_collection.update_one({"chat_id": chat_id_str}, {"$set": {"chat_id": chat_id_str}}, upsert=True)
+            mongo_success = True
         except Exception as e:
             print(f"MongoDB Error: {e}")
-    else:
+            
+    if not mongo_success:
         users = set()
         if os.path.exists('users.txt'):
             with open('users.txt', 'r') as f:
@@ -169,6 +172,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Starting broadcast...")
     success = 0
     failed = 0
+    fallback = False
     
     if users_collection is not None:
         try:
@@ -183,7 +187,11 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         failed += 1
         except Exception as e:
             print(f"MongoDB Error: {e}")
+            fallback = True
     else:
+        fallback = True
+        
+    if fallback:
         if os.path.exists('users.txt'):
             with open('users.txt', 'r') as f:
                 for line in f:
