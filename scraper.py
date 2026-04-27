@@ -152,4 +152,37 @@ def fetch_reviews(product_url, sort_order='MOST_RECENT', total_required=10):
             
     return all_reviews[:total_required]
 
+def fetch_reviews_by_name(product_url, target_name, max_pages=100):
+    all_matched = []
+    page = 1
+    target_name_lower = target_name.lower().strip()
+    
+    product_url = resolve_url(product_url)
+    
+    while page <= max_pages:
+        url = get_review_url(product_url, 'MOST_RECENT', page)
+        try:
+            response = requests.get(url, impersonate="chrome119", timeout=10)
+        except Exception as e:
+            break
+            
+        if response.status_code != 200:
+            break
+            
+        page_reviews = extract_reviews_from_html(response.text)
+        if not page_reviews:
+            break
+            
+        for r in page_reviews:
+            if target_name_lower in r.get('author', '').lower().strip():
+                all_matched.append(r)
+                
+        if all_matched:
+            # Found the review(s), no need to keep searching
+            break
+            
+        page += 1
+        
+    return all_matched
+
 
