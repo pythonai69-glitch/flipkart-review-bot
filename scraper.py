@@ -152,37 +152,42 @@ def fetch_reviews(product_url, sort_order='MOST_RECENT', total_required=10):
             
     return all_reviews[:total_required]
 
-def fetch_reviews_by_name(product_url, target_name, max_pages=100):
+import concurrent.futures
+
+def fetch_reviews_by_name(product_url, target_name, max_pages=500):
     all_matched = []
-    page = 1
-    target_name_lower = target_name.lower().strip()
+    target_name_normalized = " ".join(target_name.lower().split())
     
     product_url = resolve_url(product_url)
     
-    while page <= max_pages:
+    def fetch_page(page):
         url = get_review_url(product_url, 'MOST_RECENT', page)
         try:
             response = requests.get(url, impersonate="chrome119", timeout=10)
-        except Exception as e:
-            break
-            
-        if response.status_code != 200:
-            break
-            
-        page_reviews = extract_reviews_from_html(response.text)
-        if not page_reviews:
-            break
-            
-        for r in page_reviews:
-            if target_name_lower in r.get('author', '').lower().strip():
-                all_matched.append(r)
-                
-        if all_matched:
-            # Found the review(s), no need to keep searching
-            break
-            
-        page += 1
+            if response.status_code == 200:
+                page_reviews = extract_reviews_from_html(response.text)
+                return page_reviews
+        except Exception:
+            pass
+        return []
+
+    # Fetch pages concurrently in chunks of 50
+    chunk_size = 50
+    for chunk_start in range(1, max_pages + 1, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, max_pages + 1)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            future_to_page = {executor.submit(fetch_page, page): page for page in range(chunk_start, chunk_end)}
+            for future in concurrent.futures.as_completed(future_to_page):
+                page_reviews = future.result()
+                for r in page_reviews:
+                    author_normalized = " ".join(r.get('author', '').lower().split())
+                    if target_name_normalized in author_normalized:
+                        all_matched.append(r)
         
+        # If found in this chunk, return early
+        if all_matched:
+            break
+            
     return all_matched
 
 
