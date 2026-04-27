@@ -88,11 +88,38 @@ def extract_reviews_from_html(html):
     return unique_reviews
 
 def resolve_url(url):
-    try:
-        response = requests.get(url, impersonate="chrome110", allow_redirects=True, timeout=10)
-        return response.url
-    except Exception:
+    if 'dl.flipkart.com' not in url and 'fktr.in' not in url:
         return url
+        
+    try:
+        # First try with curl_cffi
+        response = requests.get(url, impersonate="chrome119", allow_redirects=True, timeout=10)
+        if response.url and 'dl.flipkart.com' not in response.url and 'fktr.in' not in response.url:
+            return response.url
+    except Exception:
+        pass
+        
+    # Fallback to standard requests with mobile user agent to get the redirect
+    try:
+        import requests as std_requests
+        headers = {'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36'}
+        resp = std_requests.get(url, headers=headers, allow_redirects=True, timeout=10)
+        if resp.url and 'dl.flipkart.com' not in resp.url and 'fktr.in' not in resp.url:
+            return resp.url
+    except Exception:
+        pass
+
+    # Last resort fallback: unshorten.me API
+    try:
+        import requests as std_requests
+        unshorten_url = f"https://unshorten.me/s/{url}"
+        unshortened = std_requests.get(unshorten_url, timeout=10).text.strip()
+        if unshortened and unshortened.startswith('http'):
+            return unshortened
+    except Exception:
+        pass
+        
+    return url
 
 def fetch_reviews(product_url, sort_order='MOST_RECENT', total_required=10):
     all_reviews = []
@@ -106,7 +133,7 @@ def fetch_reviews(product_url, sort_order='MOST_RECENT', total_required=10):
     while len(all_reviews) < total_required:
         url = get_review_url(product_url, flipkart_sort, page)
         try:
-            response = requests.get(url, impersonate="chrome110", timeout=10)
+            response = requests.get(url, impersonate="chrome119", timeout=10)
         except Exception as e:
             break
             

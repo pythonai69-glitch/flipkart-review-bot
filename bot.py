@@ -80,7 +80,8 @@ async def select_sort(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [
         [InlineKeyboardButton("10", callback_data='10'), InlineKeyboardButton("30", callback_data='30')],
-        [InlineKeyboardButton("60", callback_data='60'), InlineKeyboardButton("100", callback_data='100')]
+        [InlineKeyboardButton("60", callback_data='60'), InlineKeyboardButton("100", callback_data='100')],
+        [InlineKeyboardButton("200", callback_data='200'), InlineKeyboardButton("All Reviews", callback_data='all')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -91,12 +92,19 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    count = int(query.data)
+    count_data = query.data
+    if count_data == 'all':
+        count = 10000  # large number to fetch all available
+        display_count = "all"
+    else:
+        count = int(count_data)
+        display_count = str(count)
+        
     context.user_data['count'] = count
     url = context.user_data['url']
     sort_order = context.user_data['sort']
     
-    await query.edit_message_text(text=f"Fetching {count} {sort_order} reviews... Please wait!")
+    await query.edit_message_text(text=f"Fetching {display_count} {sort_order} reviews... Please wait!")
     
     # Run the synchronous scraper in an executor to avoid blocking the event loop
     loop = asyncio.get_event_loop()
