@@ -5,6 +5,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 from scraper import get_review_url, extract_reviews_from_html, fetch_reviews, fetch_reviews_by_name
 import pymongo
+import logging
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -21,27 +25,30 @@ if MONGO_URI:
         db = db_client["flipkart_bot"]
         users_collection = db["users"]
     except Exception as e:
-        print(f"Failed to connect to MongoDB: {e}")
+        logger.error(f"Failed to connect to MongoDB: {e}")
 
 def save_user(chat_id):
-    chat_id_str = str(chat_id)
-    mongo_success = False
-    if users_collection is not None:
-        try:
-            users_collection.update_one({"chat_id": chat_id_str}, {"$set": {"chat_id": chat_id_str}}, upsert=True)
-            mongo_success = True
-        except Exception as e:
-            print(f"MongoDB Error: {e}")
-            
-    if not mongo_success:
-        users = set()
-        if os.path.exists('users.txt'):
-            with open('users.txt', 'r') as f:
-                for line in f:
-                    users.add(line.strip())
-        if chat_id_str not in users:
-            with open('users.txt', 'a') as f:
-                f.write(chat_id_str + '\n')
+    try:
+        chat_id_str = str(chat_id)
+        mongo_success = False
+        if users_collection is not None:
+            try:
+                users_collection.update_one({"chat_id": chat_id_str}, {"$set": {"chat_id": chat_id_str}}, upsert=True)
+                mongo_success = True
+            except Exception as e:
+                logger.error(f"MongoDB Error: {e}")
+                
+        if not mongo_success:
+            users = set()
+            if os.path.exists('users.txt'):
+                with open('users.txt', 'r') as f:
+                    for line in f:
+                        users.add(line.strip())
+            if chat_id_str not in users:
+                with open('users.txt', 'a') as f:
+                    f.write(chat_id_str + '\n')
+    except Exception as e:
+        logger.error(f"Error in save_user: {e}")
 # States for conversation
 WAITING_FOR_LINK = 1
 WAITING_FOR_SORT = 2
@@ -317,5 +324,5 @@ if __name__ == '__main__':
 
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler('broadcast', broadcast))
-    print("Bot is polling...")
+    logger.info("Bot is polling...")
     application.run_polling()
