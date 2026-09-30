@@ -1,8 +1,9 @@
 import os
 import asyncio
-from dotenv import load_dotenv
 import re
+from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import Forbidden, TelegramError
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 from scraper import get_review_url, extract_reviews_from_html, fetch_reviews, fetch_reviews_by_name, resolve_url
 import pymongo
@@ -311,6 +312,12 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Broadcast complete.\nSuccessful: {success}\nFailed: {failed}")
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if isinstance(context.error, Forbidden):
+        logger.warning(f"Telegram error (bot was blocked by user or forbidden): {context.error}")
+        return
+    logger.error("Exception while handling an update:", exc_info=context.error)
+
 from keep_alive import keep_alive
 
 if __name__ == '__main__':
@@ -340,5 +347,6 @@ if __name__ == '__main__':
 
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler('broadcast', broadcast))
+    application.add_error_handler(error_handler)
     logger.info("Bot is polling...")
     application.run_polling()
