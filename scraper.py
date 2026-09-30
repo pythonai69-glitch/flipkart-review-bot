@@ -3,12 +3,30 @@ import urllib.parse
 from curl_cffi import requests
 from bs4 import BeautifulSoup
 
+def clean_flipkart_url(raw_url):
+    if not raw_url:
+        return raw_url
+    # If Flipkart returned an embedded url like /dlhttp://m.flipkart.com/...
+    idx = raw_url.find('http', 4)
+    if idx != -1:
+        raw_url = raw_url[idx:]
+        
+    parsed = urllib.parse.urlparse(raw_url)
+    netloc = 'www.flipkart.com'
+    path = parsed.path
+    if path.startswith('/dl/'):
+        path = path[3:]
+    return urllib.parse.urlunparse(('https', netloc, path, parsed.params, parsed.query, ''))
+
 def get_review_url(base_url, sort_order, page):
-    parsed = urllib.parse.urlparse(base_url)
+    cleaned_url = clean_flipkart_url(base_url)
+    parsed = urllib.parse.urlparse(cleaned_url)
     
     new_path = parsed.path
-    if '/p/' in new_path:
-        new_path = new_path.replace('/p/', '/product-reviews/')
+    if '/product-reviews/' not in new_path:
+        new_path = re.sub(r'/p/(itm[a-zA-Z0-9]+)', r'/product-reviews/\1', new_path)
+        if '/product-reviews/' not in new_path and '/p/' in new_path:
+            new_path = new_path.replace('/p/', '/product-reviews/')
         
     query_params = urllib.parse.parse_qs(parsed.query)
     pid = query_params.get('pid', [''])[0]
@@ -18,33 +36,32 @@ def get_review_url(base_url, sort_order, page):
         new_params['pid'] = pid
         
     new_query = urllib.parse.urlencode(new_params)
-    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, new_path, parsed.params, new_query, parsed.fragment))
+    return urllib.parse.urlunparse(('https', 'www.flipkart.com', new_path, parsed.params, new_query, ''))
 
 import json
 
 def extract_reviews_from_html(html):
     reviews = []
     
-    # Try finding __INITIAL_STATE__
-    match = re.search(r'window\.__INITIAL_STATE__\s*=\s*({.*?});</script>', html)
+    # Try finding __INITIAL_STATE__ with DOTALL to support multiline JSON
+    match = re.search(r'window\.__INITIAL_STATE__\s*=\s*({.*?});(?:</script>|\n)', html, re.DOTALL)
+    if not match:
+        match = re.search(r'window\.__INITIAL_STATE__\s*=\s*({.*?});', html, re.DOTALL)
     if not match:
         return []
         
     try:
         data = json.loads(match.group(1))
-        # Finding deeply nested reviews in Flipkart's INITIAL_STATE
-        # It's an enormous object, we can just dump it to string and use regex to find Review objects
-        # or recursively search the dict for "type": "ProductReviewValue"
         
         def find_reviews(d):
             found = []
             if isinstance(d, dict):
-                if d.get("type") == "ProductReviewValue" and "rating" in d and "text" in d and "title" in d:
+                if d.get("type") == "ProductReviewValue" and ("rating" in d or "text" in d):
                     author = d.get('author', 'Unknown')
                     created = d.get('created', '')
                     certified = d.get('certifiedBuyer', False)
                     loc_dict = d.get('location', {})
-                    if loc_dict:
+                    if loc_dict and isinstance(loc_dict, dict):
                         city = loc_dict.get('city', '')
                         state = loc_dict.get('state', '')
                         location = f"{city}, {state}".strip(", ")
@@ -53,17 +70,22 @@ def extract_reviews_from_html(html):
                         
                     review_url_path = d.get('url', '')
                     full_review_url = f"https://www.flipkart.com{review_url_path}" if review_url_path else ""
+                    
+                    rating_val = str(d.get('rating', ''))
+                    title_val = d.get('title', '')
+                    body_val = d.get('text', '')
                         
-                    found.append({
-                        'rating': str(d.get('rating')),
-                        'title': d.get('title', ''),
-                        'body': d.get('text', ''),
-                        'author': author,
-                        'created': created,
-                        'certified': certified,
-                        'location': location,
-                        'url': full_review_url
-                    })
+                    if rating_val or body_val:
+                        found.append({
+                            'rating': rating_val,
+                            'title': title_val,
+                            'body': body_val,
+                            'author': author,
+                            'created': created,
+                            'certified': certified,
+                            'location': location,
+                            'url': full_review_url
+                        })
                 for k, v in d.items():
                     found.extend(find_reviews(v))
             elif isinstance(d, list):
@@ -88,38 +110,58 @@ def extract_reviews_from_html(html):
     return unique_reviews
 
 def resolve_url(url):
-    if 'dl.flipkart.com' not in url and 'fktr.in' not in url:
+    if not url:
         return url
         
-    try:
-        # First try with curl_cffi
-        response = requests.get(url, impersonate="chrome119", allow_redirects=True, timeout=10)
-        if response.url and 'dl.flipkart.com' not in response.url and 'fktr.in' not in response.url:
-            return response.url
-    except Exception:
-        pass
+    # Extract url if wrapped inside share text
+    match = re.search(r'https?://[^\s]+', url)
+    if match:
+        url = match.group(0)
         
-    # Fallback to standard requests with mobile user agent to get the redirect
+    # If not a short link or deep link, just clean and return
+    if 'dl.flipkart.com' not in url and 'fktr.in' not in url:
+        return clean_flipkart_url(url)
+        
+    # 1. Try checking 301/302 Location header without following redirect (avoids /dlhttp:// 404 issue)
     try:
-        import requests as std_requests
-        headers = {'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36'}
-        resp = std_requests.get(url, headers=headers, allow_redirects=True, timeout=10)
-        if resp.url and 'dl.flipkart.com' not in resp.url and 'fktr.in' not in resp.url:
-            return resp.url
-    except Exception:
-        pass
+        resp = requests.get(url, impersonate="chrome119", allow_redirects=False, timeout=10)
+        loc = resp.headers.get('Location') or resp.headers.get('location')
+        if loc:
+            cleaned = clean_flipkart_url(loc)
+            if '/p/' in cleaned or '/product-reviews/' in cleaned:
+                return cleaned
+    except Exception as e:
+        print(f"Error resolving short link (no-redirect): {e}")
 
-    # Last resort fallback: unshorten.me API
+    # 2. Try following redirect with curl_cffi
     try:
-        import requests as std_requests
-        unshorten_url = f"https://unshorten.me/s/{url}"
-        unshortened = std_requests.get(unshorten_url, timeout=10).text.strip()
-        if unshortened and unshortened.startswith('http'):
-            return unshortened
-    except Exception:
-        pass
-        
-    return url
+        resp = requests.get(url, impersonate="chrome119", allow_redirects=True, timeout=10)
+        if resp.url:
+            cleaned = clean_flipkart_url(resp.url)
+            if '/p/' in cleaned or '/product-reviews/' in cleaned:
+                return cleaned
+    except Exception as e:
+        print(f"Error resolving short link (with-redirect): {e}")
+
+    # 3. Fallback: urllib.request (standard library)
+    try:
+        import urllib.request as std_urllib
+        class NoRedirectHandler(std_urllib.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+        opener = std_urllib.build_opener(NoRedirectHandler)
+        req = std_urllib.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+        try:
+            opener.open(req, timeout=10)
+        except std_urllib.HTTPError as e:
+            if e.code in (301, 302, 303, 307, 308):
+                loc = e.headers.get('Location')
+                if loc:
+                    return clean_flipkart_url(loc)
+    except Exception as e:
+        print(f"Error in urllib fallback: {e}")
+
+    return clean_flipkart_url(url)
 
 def fetch_reviews(product_url, sort_order='MOST_RECENT', total_required=10):
     all_reviews = []
@@ -135,9 +177,11 @@ def fetch_reviews(product_url, sort_order='MOST_RECENT', total_required=10):
         try:
             response = requests.get(url, impersonate="chrome119", timeout=10)
         except Exception as e:
+            print(f"Scraper request error: {e}")
             break
             
         if response.status_code != 200:
+            print(f"Scraper returned status {response.status_code} for {url}")
             break
             
         page_reviews = extract_reviews_from_html(response.text)

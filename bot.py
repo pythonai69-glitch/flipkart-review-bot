@@ -1,9 +1,10 @@
 import os
 import asyncio
 from dotenv import load_dotenv
+import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
-from scraper import get_review_url, extract_reviews_from_html, fetch_reviews, fetch_reviews_by_name
+from scraper import get_review_url, extract_reviews_from_html, fetch_reviews, fetch_reviews_by_name, resolve_url
 import pymongo
 import logging
 
@@ -62,12 +63,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def receive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user(update.effective_chat.id)
-    url = update.message.text
-    if 'flipkart.com' not in url:
-        await update.message.reply_text("Please provide a valid Flipkart link.")
+    text = update.message.text or ""
+    
+    # Extract URL from message (supports sharing directly from Flipkart app with product title)
+    match = re.search(r'https?://[^\s]+', text)
+    if not match:
+        await update.message.reply_text("❌ Please provide a valid Flipkart link.")
         return WAITING_FOR_LINK
         
-    context.user_data['url'] = url
+    raw_url = match.group(0)
+    if 'flipkart.com' not in raw_url and 'fktr.in' not in raw_url:
+        await update.message.reply_text("❌ Please provide a valid Flipkart link.")
+        return WAITING_FOR_LINK
+        
+    # Resolve short links (dl.flipkart.com/s/..., fktr.in/...) immediately
+    resolved_url = resolve_url(raw_url)
+    logger.info(f"User {update.effective_chat.id} sent link: {raw_url} -> Resolved: {resolved_url}")
+    
+    context.user_data['url'] = resolved_url
     
     keyboard = [
         [InlineKeyboardButton("Most Recent", callback_data='recent')],
@@ -128,7 +141,10 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
         
     if not reviews:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="No reviews could be extracted. The product might have no reviews or the bot was blocked.")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text="❌ Is product par koi reviews nahi mile (No reviews found).\n\nKripya check karein:\n1. Kya is product par pehle se reviews available hain?\n2. Link sahi aur active product ka hai."
+        )
         return ConversationHandler.END
         
     import html
