@@ -338,7 +338,9 @@ def resolve_url(url):
         raise FlipkartResolutionError(f"Could not resolve shortlink '{url}' to a valid product page.")
     return cleaned_fallback
 
-_DIRECT_BLOCKED_UNTIL = 0
+# If running on Render cloud datacenter, direct requests are permanently blocked with 529 by Flipkart.
+# Start with direct blocked so we go straight to Google Edge Proxy without wasting time on 529 errors.
+_DIRECT_BLOCKED_UNTIL = float('inf') if os.getenv("RENDER") else 0
 
 def fetch_page_html(url, session=None):
     """Fetches HTML with direct curl_cffi and automatic Google Translate Edge Proxy bypass for Cloud Datacenter 529 blocks."""
@@ -346,7 +348,7 @@ def fetch_page_html(url, session=None):
     s = session or get_session()
     now = time.time()
     
-    # 1. Attempt Direct with curl_cffi (if not currently cached as blocked)
+    # 1. Attempt Direct with curl_cffi (if not on Render and not currently cached as blocked)
     if now > _DIRECT_BLOCKED_UNTIL:
         headers = {
             'Referer': 'https://www.flipkart.com/',
@@ -425,7 +427,7 @@ def fetch_reviews(product_url, sort_order='MOST_RECENT', total_required=10):
     log_diagnostic("fetch_reviews_completed", {"product_url": product_url, "total_found": len(all_reviews)})
     return all_reviews[:total_required]
 
-def fetch_reviews_by_name(product_url, target_name, max_pages=500):
+def fetch_reviews_by_name(product_url, target_name, max_pages=60):
     all_matched = []
     target_name_normalized = " ".join(target_name.lower().split())
     
@@ -439,10 +441,10 @@ def fetch_reviews_by_name(product_url, target_name, max_pages=500):
             return extract_reviews_from_html(html_content)
         return []
 
-    chunk_size = 25
+    chunk_size = 5
     for chunk_start in range(1, max_pages + 1, chunk_size):
         chunk_end = min(chunk_start + chunk_size, max_pages + 1)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             future_to_page = {executor.submit(fetch_page, page): page for page in range(chunk_start, chunk_end)}
             for future in concurrent.futures.as_completed(future_to_page):
                 try:
@@ -456,5 +458,6 @@ def fetch_reviews_by_name(product_url, target_name, max_pages=500):
         
         if all_matched:
             break
+        time.sleep(0.2)
             
     return all_matched
