@@ -1,11 +1,14 @@
 import os
 import re
 import json
+import time
 import logging
 import urllib.parse
+import urllib.request as std_urllib
 import concurrent.futures
 from curl_cffi import requests
 from bs4 import BeautifulSoup
+import pymongo
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +17,7 @@ class FlipkartError(Exception):
     pass
 
 class FlipkartBlockedError(FlipkartError):
-    """Raised when Flipkart blocks requests (HTTP 403 / 429 / Akamai Bot Protection)."""
+    """Raised when Flipkart blocks requests (HTTP 403 / 429 / Akamai Bot Protection / Redirects)."""
     pass
 
 class FlipkartResolutionError(FlipkartError):
@@ -22,6 +25,26 @@ class FlipkartResolutionError(FlipkartError):
     pass
 
 _SESSION = None
+_MONGO_CLIENT = None
+
+def log_diagnostic(event, payload=None):
+    """Logs diagnostic info to MongoDB debug_logs collection for live server troubleshooting."""
+    global _MONGO_CLIENT
+    try:
+        mongo_uri = os.getenv("MONGO_URI")
+        if not mongo_uri:
+            return
+        if _MONGO_CLIENT is None:
+            _MONGO_CLIENT = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
+        db = _MONGO_CLIENT["flipkart_bot"]
+        doc = {
+            "event": event,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "data": payload or {}
+        }
+        db["debug_logs"].insert_one(doc)
+    except Exception as e:
+        logger.warning(f"Could not write diagnostic log: {e}")
 
 def get_session():
     """Returns a persistent curl_cffi Session with Chrome 120 TLS fingerprint, 
@@ -53,10 +76,15 @@ def get_session():
         # Warmup session on Flipkart homepage to acquire ak_bmsc and session tokens
         try:
             r = session.get('https://www.flipkart.com/', timeout=12)
+            log_diagnostic("session_warmup", {
+                "status": r.status_code, 
+                "cookies": list(session.cookies.keys())
+            })
             if r.status_code == 200:
                 logger.info(f"Warmup successful. Acquired {len(session.cookies)} Flipkart cookies.")
         except Exception as e:
-            logger.warning(f"Warmup homepage fetch failed (continuing anyway): {e}")
+            logger.warning(f"Warmup homepage fetch failed: {e}")
+            log_diagnostic("session_warmup_error", {"error": str(e)})
             
         _SESSION = session
     return _SESSION
@@ -64,7 +92,6 @@ def get_session():
 def clean_flipkart_url(raw_url):
     if not raw_url:
         return raw_url
-    # If Flipkart returned an embedded url like /dlhttp://m.flipkart.com/...
     idx = raw_url.find('http', 4)
     if idx != -1:
         raw_url = raw_url[idx:]
@@ -98,7 +125,9 @@ def get_review_url(base_url, sort_order, page):
 
 def extract_reviews_from_html(html):
     reviews = []
-    
+    if not html:
+        return reviews
+        
     # 1. Try finding __INITIAL_STATE__ with DOTALL to support multiline JSON
     match = re.search(r'window\.__INITIAL_STATE__\s*=\s*({.*?});(?:</script>|\n)', html, re.DOTALL)
     if not match:
@@ -156,11 +185,9 @@ def extract_reviews_from_html(html):
     if not reviews and html:
         try:
             soup = BeautifulSoup(html, 'html.parser')
-            # Look for rating tags (e.g. '5★', '4★')
             rating_tags = soup.find_all(lambda tag: tag.name in ('div', 'span') and tag.string and re.match(r'^[1-5]\s*★?$', tag.string.strip()))
             for r_tag in rating_tags:
                 r_val = r_tag.string.strip().replace('★', '').strip()
-                # Find review container
                 curr = r_tag
                 container = None
                 for _ in range(5):
@@ -185,7 +212,7 @@ def extract_reviews_from_html(html):
         except Exception as e:
             logger.warning(f"DOM fallback parse error: {e}")
 
-    # Remove duplicates if any
+    # Remove duplicates
     unique_reviews = []
     seen = set()
     for r in reviews:
@@ -197,16 +224,14 @@ def extract_reviews_from_html(html):
     return unique_reviews
 
 def resolve_url(url):
-    """Resolves short links (dl.flipkart.com/s/..., fktr.in/...) and deep links to full Flipkart product URLs."""
+    """Resolves short links (dl.flipkart.com/s/..., fktr.in/...) to full Flipkart product URLs."""
     if not url:
         return url
         
-    # Extract url if wrapped inside share text
     match = re.search(r'https?://[^\s]+', url)
     if match:
         url = match.group(0)
         
-    # If already a full product or review url, clean and return
     if 'dl.flipkart.com/s/' not in url and 'fktr.in' not in url and '/s/' not in urllib.parse.urlparse(url).path:
         cleaned = clean_flipkart_url(url)
         if '/p/' in cleaned or '/product-reviews/' in cleaned:
@@ -214,7 +239,7 @@ def resolve_url(url):
 
     session = get_session()
 
-    # 1. Try checking 301/302 Location header or JSON body without following redirect
+    # 1. Check 301/302 Location header or JSON body without redirect
     try:
         resp = session.get(url, allow_redirects=False, timeout=12)
         loc = resp.headers.get('Location') or resp.headers.get('location')
@@ -233,25 +258,26 @@ def resolve_url(url):
         if loc:
             cleaned = clean_flipkart_url(loc)
             if '/p/' in cleaned or '/product-reviews/' in cleaned:
-                logger.info(f"Resolved shortlink via Location/JSON: {url} -> {cleaned}")
+                logger.info(f"Resolved shortlink: {url} -> {cleaned}")
+                log_diagnostic("resolved_shortlink", {"raw": url, "resolved": cleaned, "method": "location_or_json"})
                 return cleaned
     except Exception as e:
         logger.warning(f"Error resolving short link (no-redirect): {e}")
 
-    # 2. Try following redirect with session
+    # 2. Check allow_redirects
     try:
         resp = session.get(url, allow_redirects=True, timeout=12)
         if resp.url:
             cleaned = clean_flipkart_url(resp.url)
             if '/p/' in cleaned or '/product-reviews/' in cleaned:
                 logger.info(f"Resolved shortlink via redirects: {url} -> {cleaned}")
+                log_diagnostic("resolved_shortlink", {"raw": url, "resolved": cleaned, "method": "redirects"})
                 return cleaned
     except Exception as e:
         logger.warning(f"Error resolving short link (with-redirect): {e}")
 
-    # 3. Fallback: urllib.request (standard library)
+    # 3. Fallback: urllib.request
     try:
-        import urllib.request as std_urllib
         class NoRedirectHandler(std_urllib.HTTPRedirectHandler):
             def redirect_request(self, req, fp, code, msg, headers, newurl):
                 return None
@@ -265,13 +291,14 @@ def resolve_url(url):
                 if loc:
                     cleaned = clean_flipkart_url(loc)
                     if '/p/' in cleaned or '/product-reviews/' in cleaned:
-                        logger.info(f"Resolved shortlink via urllib: {url} -> {cleaned}")
+                        log_diagnostic("resolved_shortlink", {"raw": url, "resolved": cleaned, "method": "urllib"})
                         return cleaned
     except Exception as e:
         logger.warning(f"Error in urllib fallback: {e}")
 
     cleaned_fallback = clean_flipkart_url(url)
     if '/p/' not in cleaned_fallback and '/product-reviews/' not in cleaned_fallback:
+        log_diagnostic("resolution_failed", {"raw": url, "cleaned": cleaned_fallback})
         raise FlipkartResolutionError(f"Could not resolve shortlink '{url}' to a valid product page.")
     return cleaned_fallback
 
@@ -281,9 +308,7 @@ def fetch_reviews(product_url, sort_order='MOST_RECENT', total_required=10):
     sort_map = {'recent': 'MOST_RECENT', 'positive': 'POSITIVE_FIRST', 'negative': 'NEGATIVE_FIRST', 'helpful': 'MOST_HELPFUL'}
     flipkart_sort = sort_map.get(sort_order, 'MOST_RECENT')
     
-    # Resolve short links before fetching
     product_url = resolve_url(product_url)
-    
     session = get_session()
     headers = {
         'Referer': 'https://www.flipkart.com/',
@@ -294,22 +319,63 @@ def fetch_reviews(product_url, sort_order='MOST_RECENT', total_required=10):
     
     while len(all_reviews) < total_required:
         url = get_review_url(product_url, flipkart_sort, page)
+        html_content = ""
+        
+        # 1. Primary Attempt: curl_cffi Session with Chrome 120
         try:
             response = session.get(url, headers=headers, timeout=15)
+            log_diagnostic("scraper_attempt_curl", {
+                "url": url,
+                "status": response.status_code,
+                "final_url": response.url,
+                "html_len": len(response.text)
+            })
+            
+            if response.status_code in (403, 429):
+                logger.error(f"Scraper blocked with HTTP {response.status_code} for {url}")
+                raise FlipkartBlockedError(f"Flipkart blocked request with HTTP {response.status_code} (Cloud IP Block).")
+
+            # Check if redirected away from review page (e.g. to homepage /)
+            if '/product-reviews/' in response.url or '/p/' in response.url:
+                if response.status_code == 200:
+                    html_content = response.text
+            else:
+                logger.warning(f"curl_cffi redirected away to {response.url}, will attempt urllib fallback.")
+        except FlipkartBlockedError:
+            raise
         except Exception as e:
-            logger.error(f"Scraper request error for {url}: {e}")
-            raise FlipkartError(f"Connection error to Flipkart: {e}")
-            
-        if response.status_code in (403, 429):
-            logger.error(f"Scraper blocked with HTTP {response.status_code} for {url}")
-            raise FlipkartBlockedError(f"Flipkart blocked request with HTTP {response.status_code} (Cloud IP Block).")
-            
-        if response.status_code != 200:
-            logger.warning(f"Scraper returned status {response.status_code} for {url}")
-            break
-            
-        page_reviews = extract_reviews_from_html(response.text)
+            logger.warning(f"curl_cffi request failed: {e}")
+            log_diagnostic("curl_attempt_error", {"url": url, "error": str(e)})
+
+        # 2. Secondary Attempt: urllib.request fallback (if curl_cffi redirected or returned empty)
+        page_reviews = extract_reviews_from_html(html_content) if html_content else []
         if not page_reviews:
+            try:
+                urllib_headers = {
+                    'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-IN,en;q=0.9,hi;q=0.8',
+                    'Referer': 'https://www.flipkart.com/'
+                }
+                req = std_urllib.Request(url, headers=urllib_headers)
+                with std_urllib.urlopen(req, timeout=12) as r:
+                    if r.status == 200:
+                        fallback_html = r.read().decode('utf-8', errors='ignore')
+                        log_diagnostic("scraper_attempt_urllib", {
+                            "url": url,
+                            "status": r.status,
+                            "final_url": r.geturl(),
+                            "html_len": len(fallback_html)
+                        })
+                        page_reviews = extract_reviews_from_html(fallback_html)
+            except Exception as e:
+                logger.warning(f"urllib fallback error: {e}")
+                log_diagnostic("urllib_attempt_error", {"url": url, "error": str(e)})
+
+        if not page_reviews:
+            # If on page 1 neither method could find reviews:
+            if page == 1:
+                log_diagnostic("zero_reviews_found", {"product_url": product_url, "url": url})
             break
             
         all_reviews.extend(page_reviews)
@@ -318,6 +384,7 @@ def fetch_reviews(product_url, sort_order='MOST_RECENT', total_required=10):
         if page > (total_required // 10) + 2:
             break
             
+    log_diagnostic("fetch_reviews_completed", {"product_url": product_url, "total_found": len(all_reviews)})
     return all_reviews[:total_required]
 
 def fetch_reviews_by_name(product_url, target_name, max_pages=500):
@@ -349,7 +416,6 @@ def fetch_reviews_by_name(product_url, target_name, max_pages=500):
             pass
         return []
 
-    # Fetch pages concurrently in chunks of 25 to avoid overwhelming network
     chunk_size = 25
     for chunk_start in range(1, max_pages + 1, chunk_size):
         chunk_end = min(chunk_start + chunk_size, max_pages + 1)
@@ -367,7 +433,6 @@ def fetch_reviews_by_name(product_url, target_name, max_pages=500):
                 except Exception:
                     pass
         
-        # If found in this chunk, return early
         if all_matched:
             break
             
