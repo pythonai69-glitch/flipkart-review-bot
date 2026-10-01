@@ -328,22 +328,20 @@ def fetch_page_html(url, session=None):
         logger.warning(f"Direct curl request failed: {e}. Switching to Google Bypass...")
         log_diagnostic("direct_curl_exception", {"url": url, "error": str(e)})
 
-    # 2. Google Web Proxy Bypass (100% bypasses Akamai HTTP 529 and Cloud Datacenter blocks)
+    # 2. Google Web Proxy Bypass (Uses Chrome 120 TLS impersonation to avoid HTTP 400)
     try:
-        g_url = 'https://translate.google.com/translate?sl=auto&tl=en&u=' + urllib.parse.quote(url)
-        req = std_urllib.Request(g_url, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-IN,en;q=0.9,hi;q=0.8'
-        })
-        with std_urllib.urlopen(req, timeout=15) as r:
-            if r.status == 200:
-                html = r.read().decode('utf-8', errors='ignore')
-                log_diagnostic("google_bypass_success", {
-                    "url": url, 
-                    "html_len": len(html), 
-                    "has_state": '__INITIAL_STATE__' in html
-                })
-                return html
+        g_url = f'https://translate.google.com/translate?sl=auto&tl=en&hl=en&u={urllib.parse.quote(url, safe="")}'
+        resp_g = requests.get(g_url, impersonate="chrome120", timeout=15)
+        if resp_g.status_code == 200:
+            html = resp_g.text
+            log_diagnostic("google_bypass_success", {
+                "url": url, 
+                "html_len": len(html), 
+                "has_state": '__INITIAL_STATE__' in html
+            })
+            return html
+        else:
+            log_diagnostic("google_bypass_status_error", {"url": url, "status": resp_g.status_code})
     except Exception as e:
         logger.error(f"Google proxy bypass failed: {e}")
         log_diagnostic("google_bypass_error", {"url": url, "error": str(e)})
