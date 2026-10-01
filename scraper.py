@@ -51,6 +51,9 @@ def get_session():
     global _SESSION
     if _SESSION is None:
         proxy = os.getenv("PROXY_URL") or os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
+        if proxy and ',' in proxy:
+            import random
+            proxy = random.choice([p.strip() for p in proxy.split(',') if p.strip()])
         proxies = {"http": proxy, "https": proxy} if proxy else None
         
         session = requests.Session(impersonate="chrome120")
@@ -338,9 +341,12 @@ def resolve_url(url):
         raise FlipkartResolutionError(f"Could not resolve shortlink '{url}' to a valid product page.")
     return cleaned_fallback
 
-# If running on Render cloud datacenter, direct requests are permanently blocked with 529 by Flipkart.
-# Start with direct blocked so we go straight to Google Edge Proxy without wasting time on 529 errors.
-_DIRECT_BLOCKED_UNTIL = float('inf') if os.getenv("RENDER") else 0
+# If a proxy is configured, direct requests will route through the proxy (bypassing Render's IP block).
+# If running on Render WITHOUT a proxy, direct requests are blocked with 529.
+def has_proxy_configured():
+    return bool(os.getenv("PROXY_URL") or os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY"))
+
+_DIRECT_BLOCKED_UNTIL = 0 if has_proxy_configured() else (float('inf') if os.getenv("RENDER") else 0)
 
 def fetch_page_html(url, session=None):
     """Fetches HTML with direct curl_cffi and automatic Google Translate Edge Proxy bypass for Cloud Datacenter 529 blocks."""
@@ -348,8 +354,8 @@ def fetch_page_html(url, session=None):
     s = session or get_session()
     now = time.time()
     
-    # 1. Attempt Direct with curl_cffi (if not on Render and not currently cached as blocked)
-    if now > _DIRECT_BLOCKED_UNTIL:
+    # 1. Attempt Direct with curl_cffi (if proxy configured, or if not on Render and not currently cached as blocked)
+    if now > _DIRECT_BLOCKED_UNTIL or has_proxy_configured():
         headers = {
             'Referer': 'https://www.flipkart.com/',
             'Sec-Fetch-Site': 'same-origin',
