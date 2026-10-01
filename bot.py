@@ -5,7 +5,16 @@ from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import Forbidden, TelegramError
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
-from scraper import get_review_url, extract_reviews_from_html, fetch_reviews, fetch_reviews_by_name, resolve_url
+from scraper import (
+    get_review_url, 
+    extract_reviews_from_html, 
+    fetch_reviews, 
+    fetch_reviews_by_name, 
+    resolve_url,
+    FlipkartBlockedError,
+    FlipkartResolutionError,
+    FlipkartError
+)
 import pymongo
 import logging
 
@@ -78,9 +87,20 @@ async def receive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_FOR_LINK
         
     # Resolve short links (dl.flipkart.com/s/..., fktr.in/...) immediately
-    resolved_url = resolve_url(raw_url)
+    try:
+        resolved_url = resolve_url(raw_url)
+    except FlipkartResolutionError as e:
+        logger.error(f"Failed to resolve shortlink: {e}")
+        await update.message.reply_text(
+            "⚠️ Yeh Flipkart short link resolve nahi ho paya.\n\n"
+            "Kripya Flipkart app se link ko browser me open karein aur full product URL copy karke bhejein."
+        )
+        return WAITING_FOR_LINK
+    except Exception as e:
+        logger.warning(f"Error during link resolution: {e}")
+        resolved_url = raw_url
+
     logger.info(f"User {update.effective_chat.id} sent link: {raw_url} -> Resolved: {resolved_url}")
-    
     context.user_data['url'] = resolved_url
     
     keyboard = [
@@ -137,8 +157,29 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loop = asyncio.get_event_loop()
     try:
         reviews = await loop.run_in_executor(None, fetch_reviews, url, sort_order, count)
+    except FlipkartBlockedError as e:
+        logger.error(f"Flipkart blocked request: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text=(
+                "⚠️ <b>Flipkart ne Cloud Server IP ko block kar diya hai (HTTP 403 / Akamai Bot Protection).</b>\n\n"
+                "💡 <b>Kamyab Hal (Permanent Solutions):</b>\n"
+                "1️⃣ <b>Local Run (Best & 100% Free):</b> Bot ko apne computer par <code>./start.sh</code> se chalayein. Indian residential internet par Flipkart kabhi block nahi karta!\n"
+                "2️⃣ <b>Proxy Use Karein:</b> Render / Cloud server ke Environment Variables me <code>PROXY_URL=http://user:pass@host:port</code> set karein."
+            ),
+            parse_mode='HTML'
+        )
+        return ConversationHandler.END
+    except FlipkartResolutionError as e:
+        logger.error(f"Resolution error: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"⚠️ Link Error: {e}\n\nKripya browser se product ka direct/full URL copy karke bhejein."
+        )
+        return ConversationHandler.END
     except Exception as e:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Error scraping reviews: {e}")
+        logger.error(f"Scraper error: {e}")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Error scraping reviews: {e}")
         return ConversationHandler.END
         
     if not reviews:
@@ -204,6 +245,14 @@ async def receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loop = asyncio.get_event_loop()
     try:
         reviews = await loop.run_in_executor(None, fetch_reviews_by_name, url, name)
+    except FlipkartBlockedError as e:
+        logger.error(f"Flipkart blocked request in search by name: {e}")
+        await msg.edit_text(
+            "⚠️ <b>Flipkart ne Cloud Server IP ko block kar diya hai (HTTP 403 / Akamai Bot Protection).</b>\n\n"
+            "💡 <b>Solution:</b> Bot ko locally <code>./start.sh</code> se chalayein ya server par <code>PROXY_URL</code> lagayein.",
+            parse_mode='HTML'
+        )
+        return ConversationHandler.END
     except Exception as e:
         await msg.edit_text(f"Error scraping reviews: {e}")
         return ConversationHandler.END
