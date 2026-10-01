@@ -92,12 +92,34 @@ def clean_flipkart_url(raw_url):
     if idx != -1:
         raw_url = raw_url[idx:]
         
+    if 'translate.goog' in raw_url:
+        raw_url = re.sub(r'https?://[a-zA-Z0-9\-]+\.translate\.goog', 'https://www.flipkart.com', raw_url)
+        parsed = urllib.parse.urlparse(raw_url)
+        qs = urllib.parse.parse_qs(parsed.query)
+        for k in list(qs.keys()):
+            if k.startswith('_x_tr_'):
+                del qs[k]
+        raw_url = urllib.parse.urlunparse((parsed.scheme, 'www.flipkart.com', parsed.path, parsed.params, urllib.parse.urlencode(qs, doseq=True), ''))
+        
     parsed = urllib.parse.urlparse(raw_url)
     netloc = 'www.flipkart.com'
     path = parsed.path
     if path.startswith('/dl/'):
         path = path[3:]
     return urllib.parse.urlunparse(('https', netloc, path, parsed.params, parsed.query, ''))
+
+def to_google_mirror_url(flipkart_url):
+    """Converts a Flipkart URL to a Google Translate Edge proxy URL.
+    Bypasses cloud datacenter IP blocks (HTTP 529) permanently without paid proxies."""
+    parsed = urllib.parse.urlparse(flipkart_url)
+    domain = parsed.netloc.replace('.', '-')
+    goog_netloc = f"{domain}.translate.goog"
+    qs = urllib.parse.parse_qs(parsed.query)
+    qs['_x_tr_sl'] = ['auto']
+    qs['_x_tr_tl'] = ['en']
+    qs['_x_tr_hl'] = ['en']
+    new_query = urllib.parse.urlencode(qs, doseq=True)
+    return urllib.parse.urlunparse(('https', goog_netloc, parsed.path, parsed.params, new_query, ''))
 
 def get_review_url(base_url, sort_order, page):
     cleaned_url = clean_flipkart_url(base_url)
@@ -272,7 +294,25 @@ def resolve_url(url):
     except Exception as e:
         logger.warning(f"Error resolving short link (with-redirect): {e}")
 
-    # 3. Fallback: urllib.request
+    # 3. Fallback: Google Edge Proxy Mirror
+    try:
+        g_url = to_google_mirror_url(url)
+        resp_g = session.get(g_url, timeout=12)
+        if resp_g.url and ('/p/' in resp_g.url or '/product-reviews/' in resp_g.url):
+            cleaned = clean_flipkart_url(resp_g.url)
+            if '/p/' in cleaned or '/product-reviews/' in cleaned:
+                log_diagnostic("resolved_shortlink", {"raw": url, "resolved": cleaned, "method": "google_edge_proxy"})
+                return cleaned
+        base_match = re.search(r'<base\s+href=[\'"](https?://[^\'"]+)[\'"]', resp_g.text)
+        if base_match:
+            cleaned = clean_flipkart_url(base_match.group(1))
+            if '/p/' in cleaned or '/product-reviews/' in cleaned:
+                log_diagnostic("resolved_shortlink", {"raw": url, "resolved": cleaned, "method": "google_edge_base"})
+                return cleaned
+    except Exception as e:
+        logger.warning(f"Error resolving short link via Google Edge Proxy: {e}")
+
+    # 4. Fallback: urllib.request
     try:
         class NoRedirectHandler(std_urllib.HTTPRedirectHandler):
             def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -298,53 +338,62 @@ def resolve_url(url):
         raise FlipkartResolutionError(f"Could not resolve shortlink '{url}' to a valid product page.")
     return cleaned_fallback
 
-def fetch_page_html(url, session=None):
-    """Fetches HTML with direct curl_cffi and automatic Google Proxy bypass for Cloud Datacenter 529 blocks."""
-    s = session or get_session()
-    headers = {
-        'Referer': 'https://www.flipkart.com/',
-        'Sec-Fetch-Site': 'same-origin',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Dest': 'document'
-    }
-    
-    # 1. Attempt Direct with curl_cffi
-    try:
-        response = s.get(url, headers=headers, timeout=12)
-        log_diagnostic("attempt_direct_curl", {
-            "url": url, 
-            "status": response.status_code, 
-            "final_url": response.url, 
-            "html_len": len(response.text)
-        })
-        
-        # If Flipkart returns 200 and stays on product/review page
-        if response.status_code == 200 and ('/product-reviews/' in response.url or '/p/' in response.url):
-            if '__INITIAL_STATE__' in response.text:
-                return response.text
-                
-        logger.warning(f"Direct request received status {response.status_code} (URL: {response.url}). Switching to Google Bypass...")
-    except Exception as e:
-        logger.warning(f"Direct curl request failed: {e}. Switching to Google Bypass...")
-        log_diagnostic("direct_curl_exception", {"url": url, "error": str(e)})
+_DIRECT_BLOCKED_UNTIL = 0
 
-    # 2. Google Web Proxy Bypass (Uses Chrome 120 TLS impersonation to avoid HTTP 400)
-    try:
-        g_url = f'https://translate.google.com/translate?sl=auto&tl=en&hl=en&u={urllib.parse.quote(url, safe="")}'
-        resp_g = requests.get(g_url, impersonate="chrome120", timeout=15)
-        if resp_g.status_code == 200:
-            html = resp_g.text
-            log_diagnostic("google_bypass_success", {
+def fetch_page_html(url, session=None):
+    """Fetches HTML with direct curl_cffi and automatic Google Translate Edge Proxy bypass for Cloud Datacenter 529 blocks."""
+    global _DIRECT_BLOCKED_UNTIL
+    s = session or get_session()
+    now = time.time()
+    
+    # 1. Attempt Direct with curl_cffi (if not currently cached as blocked)
+    if now > _DIRECT_BLOCKED_UNTIL:
+        headers = {
+            'Referer': 'https://www.flipkart.com/',
+            'Sec-Fetch-Site': 'same-origin',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Dest': 'document'
+        }
+        try:
+            response = s.get(url, headers=headers, timeout=8)
+            log_diagnostic("attempt_direct_curl", {
                 "url": url, 
-                "html_len": len(html), 
-                "has_state": '__INITIAL_STATE__' in html
+                "status": response.status_code, 
+                "final_url": response.url, 
+                "html_len": len(response.text)
             })
-            return html
+            
+            # If Flipkart returns 200 and stays on product/review page
+            if response.status_code == 200 and ('/product-reviews/' in response.url or '/p/' in response.url):
+                if '__INITIAL_STATE__' in response.text:
+                    return response.text
+                    
+            if response.status_code in (529, 403, 429):
+                logger.warning(f"Direct request received status {response.status_code}. Caching direct block for 15 minutes and using Google Edge Proxy.")
+                _DIRECT_BLOCKED_UNTIL = now + 900
+            else:
+                logger.warning(f"Direct request received status {response.status_code} (URL: {response.url}). Switching to Google Edge Proxy...")
+        except Exception as e:
+            logger.warning(f"Direct curl request failed: {e}. Switching to Google Edge Proxy...")
+            log_diagnostic("direct_curl_exception", {"url": url, "error": str(e)})
+
+    # 2. Google Translate Edge Proxy Bypass (Always works worldwide, bypasses Akamai 529 completely)
+    try:
+        g_url = to_google_mirror_url(url)
+        resp_g = s.get(g_url, timeout=15)
+        log_diagnostic("google_edge_proxy_attempt", {
+            "url": url,
+            "g_url": g_url,
+            "status": resp_g.status_code,
+            "html_len": len(resp_g.text)
+        })
+        if resp_g.status_code == 200 and len(resp_g.text) > 1000:
+            return resp_g.text
         else:
-            log_diagnostic("google_bypass_status_error", {"url": url, "status": resp_g.status_code})
+            log_diagnostic("google_edge_proxy_status_error", {"url": url, "status": resp_g.status_code})
     except Exception as e:
-        logger.error(f"Google proxy bypass failed: {e}")
-        log_diagnostic("google_bypass_error", {"url": url, "error": str(e)})
+        logger.error(f"Google Edge Proxy bypass failed: {e}")
+        log_diagnostic("google_edge_proxy_error", {"url": url, "error": str(e)})
 
     return ""
 
